@@ -29,6 +29,11 @@ const int MICROSTEP_MODE = 8;        // Microstepping divisor: 1, 2, 4, 8, or 16
 
 const int enablePin = 16;
 const int limitSwitchPin = 23;  // limit switch for homing; external pull-up, default HIGH
+const bool RUN_MOTOR_TEST_AT_STARTUP = false;
+const int MOTOR_TEST_REVOLUTIONS = 10;
+const int MOTOR_TEST_SPEED = 600;
+const int MOTOR_TEST_ACCELERATION = 800;
+const unsigned long SWITCH_DEBOUNCE_MS = 30;
 const int ms1Pin = 17;          // define pins for stepping mode
 const int ms2Pin = 18;          // stepping modes change the step resolution of the motor
 const int ms3Pin = 19;          // higher resolution comes at the expense of higher speeds and torque
@@ -62,6 +67,9 @@ char receivedChars[numChars];  // an array to store the received data
 boolean newData = false;
 
 int dataNumber = 0;  // new for this version
+bool lastRawLimitSwitchState = HIGH;
+bool debouncedLimitSwitchState = HIGH;
+unsigned long lastSwitchTransitionTimeMs = 0;
 // end Alternative to parseInt
 
 
@@ -81,25 +89,55 @@ void setup() {
   digitalWrite(ms3Pin, MS3_MODE);
   digitalWrite(enablePin, LOW);
 
-  homeMotor();
+  if (RUN_MOTOR_TEST_AT_STARTUP) {
+    runMotorTest();
+  }
 }
 
 void loop() {
   // randStepper();
   // variableStepper();
-   angleInputNB();
+  limitSwitchStepTest();
+  // angleInputNB();
   // stepsInputNB();
 }
 
-void homeMotor() {
-  myStepper.setMaxSpeed(300);
-  myStepper.setSpeed(-300);  // slow negative-direction speed for homing
-  while (digitalRead(limitSwitchPin) == HIGH) {
-    myStepper.runSpeed();
+void runMotorTest() {
+  long testSteps = (long)MOTOR_TEST_REVOLUTIONS * STEPS_PER_REV_FULL * MICROSTEP_MODE;
+  Serial.print("[TEST] Running motor test for ");
+  Serial.print(MOTOR_TEST_REVOLUTIONS);
+  Serial.print(" rev (");
+  Serial.print(testSteps);
+  Serial.println(" steps), ignoring limit switch...");
+
+  myStepper.setMaxSpeed(MOTOR_TEST_SPEED);
+  myStepper.setAcceleration(MOTOR_TEST_ACCELERATION);
+  myStepper.moveTo(myStepper.currentPosition() + testSteps);
+  while (myStepper.distanceToGo() != 0) {
+    myStepper.run();
   }
-  myStepper.setCurrentPosition(0);  // mark this as the home position
-  myStepper.setMaxSpeed(10000);     // restore original settings
+
+  Serial.println("[TEST] Motor test complete.");
+  myStepper.setMaxSpeed(10000);
   myStepper.setAcceleration(14000);
+}
+
+void limitSwitchStepTest() {
+  bool switchState = digitalRead(limitSwitchPin);
+  unsigned long nowMs = millis();
+
+  // Debounce raw signal transitions before accepting a new stable state.
+  if (switchState != lastRawLimitSwitchState) {
+    lastSwitchTransitionTimeMs = nowMs;
+    lastRawLimitSwitchState = switchState;
+  }
+
+  if ((nowMs - lastSwitchTransitionTimeMs) >= SWITCH_DEBOUNCE_MS && switchState != debouncedLimitSwitchState) {
+    debouncedLimitSwitchState = switchState;
+    if (debouncedLimitSwitchState == LOW) {
+      Serial.println("limit switch pressed");
+    }
+  }
 }
 
 void randStepper()
