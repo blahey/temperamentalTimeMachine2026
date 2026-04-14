@@ -1,216 +1,253 @@
-// Stepper Configuration
-// Motor: NEMA 17 Stepper Motor (200 steps/revolution at full stepping)
-// 4.2 kg-cm 4 Wire NEMA 17 Stepper Motor by CW-MOTOR. SKU: 42BYGH4807
-//   https://www.circuitspecialists.com/nema_17_stepper_motor_42bygh4807
-// Driver: A4988 Stepper Motor Driver
-//   https://www.amazon.com/dp/B07BND65C8
+// Temperamental Time Machine — Motor Control
+// ============================================================
+// Stage 1: Single motor, slide on bass string.
+// End goal: 4 motors controlling slide positions → musical pitch/interval control.
+//
+// Hardware:
+//   MCU:    Teensy 3.5
+//   Motor:  NEMA 17 42BYGH4807 (200 steps/rev, 4-wire)
+//           https://www.circuitspecialists.com/nema_17_stepper_motor_42bygh4807
+//   Driver: A4988
+//           https://www.amazon.com/dp/B07BND65C8
+//   Limit switch: pin 23, external pull-up, active LOW (triggers when slide reaches home)
+//   Pot:    A13 (reserved, currently unused)
+//
+// References:
+//   https://lastminuteengineers.com/a4988-stepper-motor-driver-arduino-tutorial/
+//   https://www.pololu.com/product/1182
+//   https://www.airspayce.com/mikem/arduino/AccelStepper/index.html
+//   https://youtu.be/TWMai3oirnM?si=IP0x5L8xtVg3shti  (How Stepper Motors Work)
+//   https://youtu.be/sER5GNjcQ70?si=cHnAq-LED0kjjmdD  (Arduino + A4988 circuit)
+// ============================================================
 
-// https://lastminuteengineers.com/a4988-stepper-motor-driver-arduino-tutorial/
+#include <AccelStepper.h>
+#include <elapsedMillis.h>
 
-// https://www.pololu.com/product/1182 
+// --- Pin assignments ---
+AccelStepper myStepper(AccelStepper::DRIVER, 14, 15);  // step=14, dir=15
+const int enablePin      = 16;
+const int limitSwitchPin = 23;  // external pull-up, active LOW
+const int ms1Pin         = 17;
+const int ms2Pin         = 18;
+const int ms3Pin         = 19;
+const int potPin         = A13;
 
-// https://www.airspayce.com/mikem/arduino/AccelStepper/index.html
+// --- Motor configuration ---
+const int STEPS_PER_REV_FULL = 200;  // NEMA 17: 200 steps/rev at full step
+const int MICROSTEP_MODE     = 8;    // 8× microstepping → 1600 steps/rev
 
-// https://youtu.be/TWMai3oirnM?si=IP0x5L8xtVg3shti (How Stepper Motors Work)
-
-// https://youtu.be/sER5GNjcQ70?si=cHnAq-LED0kjjmdD (Shows complete Arduino Uno implementation of circuit)
-
-
-
-#include <AccelStepper.h> // Install this library if you haven't already done so!
-AccelStepper myStepper(1, 14, 15);  // 1 sets the MotorInterfaceType to DRIVER; pin 14 = step; pin 15 = direction
-//AccelStepper myStepper(4, 0, 2, 1, 3); // define motor pins (0, 2, 1, 3) and interface mode (4)
-
-const int STEPS_PER_REV_FULL = 200;  // NEMA 17 motor: 200 steps/revolution at full stepping
-const int MICROSTEP_MODE = 8;        // Microstepping divisor: 1, 2, 4, 8, or 16
-                                      // Total steps/rev = STEPS_PER_REV_FULL * MICROSTEP_MODE
-
-
-
-const int enablePin = 16;
-const int limitSwitchPin = 23;  // limit switch for homing; external pull-up, default HIGH
-const bool RUN_MOTOR_TEST_AT_STARTUP = false;
-const int MOTOR_TEST_REVOLUTIONS = 10;
-const int MOTOR_TEST_SPEED = 600;
-const int MOTOR_TEST_ACCELERATION = 800;
-const unsigned long SWITCH_DEBOUNCE_MS = 30;
-const int ms1Pin = 17;          // define pins for stepping mode
-const int ms2Pin = 18;          // stepping modes change the step resolution of the motor
-const int ms3Pin = 19;          // higher resolution comes at the expense of higher speeds and torque
-
-
-// Microstepping pin settings by MICROSTEP_MODE (MS1, MS2, MS3):
-// 1  (full step):       LOW,  LOW,  LOW
-// 2  (half step):       HIGH, LOW,  LOW
-// 4  (quarter step):    LOW,  HIGH, LOW
-// 8  (eighth step):     HIGH, HIGH, LOW
-// 16 (sixteenth step):  HIGH, HIGH, HIGH
-// Current MICROSTEP_MODE = 8 (eighth step): HIGH, HIGH, LOW
+// Microstepping pin levels (MS1, MS2, MS3):
+// 1  (full):      LOW,  LOW,  LOW
+// 2  (half):      HIGH, LOW,  LOW
+// 4  (quarter):   LOW,  HIGH, LOW
+// 8  (eighth):    HIGH, HIGH, LOW   ← current
+// 16 (sixteenth): HIGH, HIGH, HIGH
 const int MS1_MODE = HIGH;
 const int MS2_MODE = HIGH;
 const int MS3_MODE = LOW;
 
-int steps = 0;
-int currentSteps = 0;
-int previousSteps = 0;
-// End Stepper Configuration
+// --- Homing ---
+const int  HOMING_SPEED     = 400;       // steps/sec during homing approach
+const int  HOMING_DIR       = -1;        // direction toward limit switch; flip to +1 if needed
+const long HOMING_MAX_STEPS = 200000L;   // max travel before declaring a homing error
 
-const int potPin = A13;
+// --- Startup motor test (optional) ---
+const bool RUN_MOTOR_TEST_AT_STARTUP = false;
+const int  MOTOR_TEST_REVOLUTIONS    = 10;
+const int  MOTOR_TEST_SPEED          = 600;
+const int  MOTOR_TEST_ACCELERATION   = 800;
 
-// Alternative to parseInt
-// From: https://forum.arduino.cc/t/serial-input-basics-updated/382007/3
-// Example 4 - Receive a number as text and convert it to an int
+// --- Switch debounce ---
+const unsigned long SWITCH_DEBOUNCE_MS = 30;
 
-const byte numChars = 32;
-char receivedChars[numChars];  // an array to store the received data
+// --- Normal operation speeds ---
+const int  NORMAL_MAX_SPEED    = 10000;
+const int  NORMAL_ACCELERATION = 14000;
 
-boolean newData = false;
+// ============================================================
+// State machine
+// ============================================================
+enum MotorState {
+  STATE_IDLE,     // pre-homing / error
+  STATE_TESTING,  // optional startup motor test
+  STATE_HOMING,   // moving toward limit switch to find home
+  STATE_HOMED     // position is zeroed; accepts serial commands
+};
+MotorState motorState = STATE_IDLE;
 
-int dataNumber = 0;  // new for this version
-bool lastRawLimitSwitchState = HIGH;
+// --- Limit switch (debounced) ---
+bool lastRawLimitSwitchState   = HIGH;
 bool debouncedLimitSwitchState = HIGH;
-unsigned long lastSwitchTransitionTimeMs = 0;
-// end Alternative to parseInt
+elapsedMillis timeSinceLastSwitchTransition;
 
+// --- Non-blocking serial receive ---
+// From: https://forum.arduino.cc/t/serial-input-basics-updated/382007/3
+const byte numChars = 32;
+char     receivedChars[numChars];
+boolean  newData   = false;
+int      dataNumber = 0;
 
+// ============================================================
+// Setup
+// ============================================================
 void setup() {
-  Serial.begin(9600);  myStepper.setMaxSpeed(10000); // sets the maximum steps per second, which determines how fast the motor will turn
-  myStepper.setAcceleration(14000); // sets the acceleration rate in steps per second
-  myStepper.setSpeed(100);
-  
-  pinMode(ms1Pin, OUTPUT);        // set step mode pins as outputs
-  pinMode(ms2Pin, OUTPUT);
-  pinMode(ms3Pin, OUTPUT);
-  pinMode(enablePin, OUTPUT);
-  pinMode(limitSwitchPin, INPUT);
+  Serial.begin(9600);
 
-  digitalWrite(ms1Pin, MS1_MODE);
-  digitalWrite(ms2Pin, MS2_MODE);
-  digitalWrite(ms3Pin, MS3_MODE);
-  digitalWrite(enablePin, LOW);
+  pinMode(ms1Pin,         OUTPUT);
+  pinMode(ms2Pin,         OUTPUT);
+  pinMode(ms3Pin,         OUTPUT);
+  pinMode(enablePin,      OUTPUT);
+  pinMode(limitSwitchPin, INPUT);   // relies on external pull-up
+
+  digitalWrite(ms1Pin,    MS1_MODE);
+  digitalWrite(ms2Pin,    MS2_MODE);
+  digitalWrite(ms3Pin,    MS3_MODE);
+  digitalWrite(enablePin, LOW);     // LOW = driver enabled
+
+  myStepper.setMaxSpeed(NORMAL_MAX_SPEED);
+  myStepper.setAcceleration(NORMAL_ACCELERATION);
 
   if (RUN_MOTOR_TEST_AT_STARTUP) {
-    runMotorTest();
+    startMotorTest();
+  } else {
+    startHoming();
   }
 }
 
+// ============================================================
+// Loop
+// ============================================================
 void loop() {
-  // randStepper();
-  // variableStepper();
-  limitSwitchStepTest();
-  // angleInputNB();
-  // stepsInputNB();
+  updateLimitSwitch();
+
+  switch (motorState) {
+    case STATE_TESTING: updateMotorTest(); break;
+    case STATE_HOMING:  updateHoming();    break;
+    case STATE_HOMED:   updateHomed();     break;
+    default:                               break;
+  }
+
+  myStepper.run();
 }
 
-void runMotorTest() {
+// ============================================================
+// Limit switch — debounced, non-blocking
+// ============================================================
+void updateLimitSwitch() {
+  bool rawState = digitalRead(limitSwitchPin);
+
+  if (rawState != lastRawLimitSwitchState) {
+    lastRawLimitSwitchState = rawState;
+    timeSinceLastSwitchTransition = 0;
+  }
+
+  if (timeSinceLastSwitchTransition >= SWITCH_DEBOUNCE_MS &&
+      rawState != debouncedLimitSwitchState) {
+    debouncedLimitSwitchState = rawState;
+    if (debouncedLimitSwitchState == LOW) {
+      Serial.println("[SWITCH] Limit switch pressed.");
+    }
+  }
+}
+
+// ============================================================
+// Motor test — optional startup sequence, non-blocking
+// ============================================================
+void startMotorTest() {
   long testSteps = (long)MOTOR_TEST_REVOLUTIONS * STEPS_PER_REV_FULL * MICROSTEP_MODE;
-  Serial.print("[TEST] Running motor test for ");
+  Serial.print("[TEST] Starting motor test: ");
   Serial.print(MOTOR_TEST_REVOLUTIONS);
   Serial.print(" rev (");
   Serial.print(testSteps);
-  Serial.println(" steps), ignoring limit switch...");
+  Serial.println(" steps)");
 
   myStepper.setMaxSpeed(MOTOR_TEST_SPEED);
   myStepper.setAcceleration(MOTOR_TEST_ACCELERATION);
   myStepper.moveTo(myStepper.currentPosition() + testSteps);
-  while (myStepper.distanceToGo() != 0) {
-    myStepper.run();
-  }
-
-  Serial.println("[TEST] Motor test complete.");
-  myStepper.setMaxSpeed(10000);
-  myStepper.setAcceleration(14000);
+  motorState = STATE_TESTING;
 }
 
-void limitSwitchStepTest() {
-  bool switchState = digitalRead(limitSwitchPin);
-  unsigned long nowMs = millis();
-
-  // Debounce raw signal transitions before accepting a new stable state.
-  if (switchState != lastRawLimitSwitchState) {
-    lastSwitchTransitionTimeMs = nowMs;
-    lastRawLimitSwitchState = switchState;
-  }
-
-  if ((nowMs - lastSwitchTransitionTimeMs) >= SWITCH_DEBOUNCE_MS && switchState != debouncedLimitSwitchState) {
-    debouncedLimitSwitchState = switchState;
-    if (debouncedLimitSwitchState == LOW) {
-      Serial.println("limit switch pressed");
-    }
+void updateMotorTest() {
+  if (myStepper.distanceToGo() == 0) {
+    Serial.println("[TEST] Motor test complete.");
+    myStepper.setMaxSpeed(NORMAL_MAX_SPEED);
+    myStepper.setAcceleration(NORMAL_ACCELERATION);
+    startHoming();
   }
 }
 
-void randStepper()
-{
-    if (myStepper.distanceToGo() == 0)
-    {
-  // Random change to speed, position and acceleration
-  // Make sure we dont get 0 speed or accelerations
-  //delay(1000);
-  myStepper.moveTo(rand() % 8000);
-  myStepper.setMaxSpeed((rand() % 2000) + 50);
-  myStepper.setAcceleration((rand() % 1000) + 1);
-    }
-    myStepper.run();
+// ============================================================
+// Homing — non-blocking
+// Move toward limit switch; zero position when switch triggers.
+// HOMING_DIR = -1 if switch is at the negative end of travel, +1 if positive.
+// ============================================================
+void startHoming() {
+  Serial.println("[HOMING] Starting homing sequence...");
+  myStepper.setMaxSpeed(HOMING_SPEED);
+  myStepper.moveTo((long)HOMING_DIR * HOMING_MAX_STEPS);
+  motorState = STATE_HOMING;
 }
 
-
-  void variableStepper(){
-    int potVal = analogRead(potPin);
-    float speed = map(potVal, 1023, 10, -4000, 4000);
-    speed = constrain(speed, -4000, 4000);
-    myStepper.setSpeed(speed);
-    myStepper.runSpeed();
-
+void updateHoming() {
+  if (debouncedLimitSwitchState == LOW) {
+    // Limit switch triggered — stop immediately and zero position.
+    // AccelStepper::setCurrentPosition() also clears target and speed.
+    myStepper.setCurrentPosition(0);
+    myStepper.setMaxSpeed(NORMAL_MAX_SPEED);
+    motorState = STATE_HOMED;
+    Serial.println("[HOMING] Complete. Position zeroed.");
+    return;
   }
 
+  if (myStepper.distanceToGo() == 0) {
+    // Traveled HOMING_MAX_STEPS without triggering switch — check wiring.
+    Serial.println("[HOMING] ERROR: Limit switch not reached. Check wiring and HOMING_DIR.");
+    motorState = STATE_IDLE;
+  }
+}
 
-void angleInputNB() {  //non-blocking version of angle input
+// ============================================================
+// Normal operation (homed) — accepts angle commands via serial.
+// Send an integer 0–360 followed by newline to move to that angle.
+// Position is relative to home (0 = home / limit switch position).
+// ============================================================
+void updateHomed() {
   recvWithEndMarker();
-  
+
   if (newData) {
     int angle = dataNumber;
-    Serial.print("angle = ");
-    Serial.println(angle);
-    int stepsPerRevolution = STEPS_PER_REV_FULL * MICROSTEP_MODE;
-    angle = map(angle, 0, 360, 0, stepsPerRevolution);
-    myStepper.moveTo(angle);
+    long stepsPerRevolution = (long)STEPS_PER_REV_FULL * MICROSTEP_MODE;
+    long targetSteps = map((long)angle, 0L, 360L, 0L, stepsPerRevolution);
+    Serial.print("[HOMED] angle=");
+    Serial.print(angle);
+    Serial.print(" deg → step target=");
+    Serial.println(targetSteps);
+    myStepper.moveTo(targetSteps);
     newData = false;
   }
-  myStepper.run();
 }
 
-void stepsInputNB() {
-  recvWithEndMarker();
-  
-  if (newData) {
-    steps = dataNumber;
-    Serial.print("steps = ");
-    Serial.println(steps);
-    myStepper.moveTo(steps);
-    newData = false;
-  }
-  myStepper.run();
-}
-
+// ============================================================
+// Non-blocking serial receive
+// Accumulates chars until newline; sets newData=true and
+// populates dataNumber with the integer value.
+// From: https://forum.arduino.cc/t/serial-input-basics-updated/382007/3
+// ============================================================
 void recvWithEndMarker() {
   static byte ndx = 0;
-  char endMarker = '\n';
   char rc;
 
   if (Serial.available() > 0) {
     rc = Serial.read();
-
-    if (rc != endMarker) {
+    if (rc != '\n') {
       receivedChars[ndx] = rc;
-      ndx++;
-      if (ndx >= numChars) {
+      if (++ndx >= numChars) {
         ndx = numChars - 1;
       }
     } else {
-      receivedChars[ndx] = '\0';  // terminate the string
-      ndx = 0;
-      newData = true;
+      receivedChars[ndx] = '\0';
+      ndx        = 0;
+      newData    = true;
       dataNumber = atoi(receivedChars);
     }
   }
