@@ -52,8 +52,14 @@ Four stepper motors, each moving a slide along a bass string. The position of ea
 
 **Motor Configuration**
 - Microstepping: 8× → 1600 steps/rev
-- Enable pin: 16 | Step pin: 14 | Direction pin: 15
-- MS pins: 17 (MS1), 18 (MS2), 19 (MS3)
+- Enable pin: 16 (shared) | MS pins: 17, 18, 19 (shared)
+- Motor 0: step=14, dir=15 | Motor 1: step=37, dir=38
+- Motor 2: step=35, dir=36 | Motor 3: step=33, dir=34
+
+**Mechanical Drive**
+- Lead screw: 8 mm linear travel per revolution
+- 1600 steps/rev ÷ 8 mm/rev = **200 steps/mm**
+- Homing backoff: 10 mm = 2000 steps
 
 ---
 
