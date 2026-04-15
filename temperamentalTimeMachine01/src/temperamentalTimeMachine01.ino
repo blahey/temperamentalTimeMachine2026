@@ -64,8 +64,10 @@ const int MS3_MODE = LOW;
 // --- Mechanical drive ---
 // Lead screw: 8 mm linear travel per 360° revolution.
 // At 8× microstepping: 1600 steps/rev → 200 steps/mm
-const float MM_PER_REV         = 8.0;
-const float STEPS_PER_MM       = (STEPS_PER_REV_FULL * MICROSTEP_MODE) / MM_PER_REV;  // 200.0
+const float MM_PER_REV          = 8.0;
+const float STEPS_PER_MM        = (STEPS_PER_REV_FULL * MICROSTEP_MODE) / MM_PER_REV;  // 200.0
+const long  TRAVEL_MIN_STEPS    = (long)(100.0 * STEPS_PER_MM);  // 20000  (100 mm)
+const long  TRAVEL_MAX_STEPS    = (long)(600.0 * STEPS_PER_MM);  // 120000 (600 mm)
 
 // --- Homing ---
 const int  HOMING_SPEED        = 400;      // steps/sec during homing approach
@@ -95,7 +97,8 @@ enum MotorState {
   STATE_TESTING,          // optional startup motor test (motor 0 only)
   STATE_HOMING,           // moving toward limit switch to find home
   STATE_HOMING_BACKOFF,   // reversing off the limit switch after contact
-  STATE_HOMED             // position is zeroed; accepts commands
+  STATE_HOMED,            // position is zeroed; accepts commands
+  STATE_RANDOM_CYCLING    // continuously moving to random positions
 };
 MotorState motorStates[NUM_MOTORS] = {
   STATE_IDLE, STATE_IDLE, STATE_IDLE, STATE_IDLE
@@ -138,6 +141,8 @@ void setup() {
     steppers[i].setAcceleration(NORMAL_ACCELERATION);
   }
 
+  randomSeed(analogRead(A0));  // seed from floating pin for better randomness
+
   if (RUN_MOTOR_TEST_AT_STARTUP) {
     startMotorTest();                        // motor 0 → STATE_TESTING
     for (int i = 1; i < NUM_MOTORS; i++) {
@@ -162,6 +167,7 @@ void loop() {
       case STATE_HOMING:         updateHoming(i);         break;
       case STATE_HOMING_BACKOFF: updateHomingBackoff(i);  break;
       case STATE_HOMED:          updateHomed(i);          break;
+      case STATE_RANDOM_CYCLING: updateRandomCycling(i);  break;
       default:                                            break;
     }
     steppers[i].run();
@@ -270,6 +276,19 @@ void updateHoming(int i) {
   }
 }
 
+// Returns true only when every motor has finished homing (STATE_HOMED or later).
+bool allMotorsHomed() {
+  for (int i = 0; i < NUM_MOTORS; i++) {
+    if (motorStates[i] == STATE_IDLE ||
+        motorStates[i] == STATE_TESTING ||
+        motorStates[i] == STATE_HOMING ||
+        motorStates[i] == STATE_HOMING_BACKOFF) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void updateHomingBackoff(int i) {
   if (steppers[i].distanceToGo() == 0) {
     steppers[i].setMaxSpeed(NORMAL_MAX_SPEED);
@@ -279,6 +298,14 @@ void updateHomingBackoff(int i) {
     Serial.print(" homed. Resting at ");
     Serial.print(steppers[i].currentPosition());
     Serial.println(" steps from switch.");
+
+    // Once every motor has finished homing, start random cycling on all of them.
+    if (allMotorsHomed()) {
+      Serial.println("[CYCLE] All motors homed. Starting random cycling.");
+      for (int m = 0; m < NUM_MOTORS; m++) {
+        startRandomCycling(m);
+      }
+    }
   }
 }
 
@@ -309,7 +336,27 @@ void updateHomed(int i) {
 }
 
 // ============================================================
-// Non-blocking serial receive
+// Random cycling — each motor independently moves to a new
+// random position (100–600 mm) whenever it reaches its target.
+// ============================================================
+void startRandomCycling(int i) {
+  long targetSteps = random(TRAVEL_MIN_STEPS, TRAVEL_MAX_STEPS + 1);
+  steppers[i].moveTo(targetSteps);
+  motorStates[i] = STATE_RANDOM_CYCLING;
+  Serial.print("[CYCLE] Motor ");
+  Serial.print(i);
+  Serial.print(" → ");
+  Serial.print(targetSteps / STEPS_PER_MM, 1);
+  Serial.println(" mm");
+}
+
+void updateRandomCycling(int i) {
+  if (steppers[i].distanceToGo() == 0) {
+    startRandomCycling(i);
+  }
+}
+
+// ============================================================
 // Accumulates chars until newline; sets newData=true and
 // populates dataNumber with the integer value.
 // From: https://forum.arduino.cc/t/serial-input-basics-updated/382007/3
