@@ -79,6 +79,7 @@ MotorState motorState = STATE_IDLE;
 bool lastRawLimitSwitchState   = HIGH;
 bool debouncedLimitSwitchState = HIGH;
 elapsedMillis timeSinceLastSwitchTransition;
+elapsedMillis timeSinceLastSwitchReport;
 
 // --- Non-blocking serial receive ---
 // From: https://forum.arduino.cc/t/serial-input-basics-updated/382007/3
@@ -139,14 +140,25 @@ void updateLimitSwitch() {
   if (rawState != lastRawLimitSwitchState) {
     lastRawLimitSwitchState = rawState;
     timeSinceLastSwitchTransition = 0;
+    // Print immediately on any raw transition.
+    Serial.print("[SWITCH] Raw transition → ");
+    Serial.println(rawState == LOW ? "LOW (pressed)" : "HIGH (open)");
   }
 
   if (timeSinceLastSwitchTransition >= SWITCH_DEBOUNCE_MS &&
       rawState != debouncedLimitSwitchState) {
     debouncedLimitSwitchState = rawState;
-    if (debouncedLimitSwitchState == LOW) {
-      Serial.println("[SWITCH] Limit switch pressed.");
-    }
+    Serial.print("[SWITCH] Debounced → ");
+    Serial.println(debouncedLimitSwitchState == LOW ? "LOW (pressed)" : "HIGH (open)");
+  }
+
+  // Periodic report every 500 ms so pin state is always visible.
+  if (timeSinceLastSwitchReport >= 500) {
+    timeSinceLastSwitchReport = 0;
+    Serial.print("[SWITCH] raw=");
+    Serial.print(rawState == LOW ? "LOW" : "HIGH");
+    Serial.print("  debounced=");
+    Serial.println(debouncedLimitSwitchState == LOW ? "LOW" : "HIGH");
   }
 }
 
