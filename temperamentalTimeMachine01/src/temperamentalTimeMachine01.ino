@@ -70,7 +70,7 @@ const long  TRAVEL_MIN_STEPS    = (long)(100.0 * STEPS_PER_MM);  // 20000  (100 
 const long  TRAVEL_MAX_STEPS    = (long)(600.0 * STEPS_PER_MM);  // 120000 (600 mm)
 
 // --- Homing ---
-const int  HOMING_SPEED        = 400;      // steps/sec during homing approach
+const int  HOMING_SPEED        = 800;      // steps/sec during homing approach
 const int  HOMING_DIR          = -1;       // direction toward limit switch; flip to +1 if needed
 const long HOMING_MAX_STEPS    = 200000L;  // max travel before declaring a homing error
 const int  HOMING_BACKOFF_MM   = 10;       // mm to reverse off switch after contact
@@ -86,8 +86,8 @@ const int  MOTOR_TEST_ACCELERATION   = 800;
 const unsigned long SWITCH_DEBOUNCE_MS = 30;
 
 // --- Normal operation speeds ---
-const int  NORMAL_MAX_SPEED    = 10000;
-const int  NORMAL_ACCELERATION = 14000;
+const int  NORMAL_MAX_SPEED    = 9000;
+const int  NORMAL_ACCELERATION = 10000;
 
 // ============================================================
 // State machine
@@ -98,7 +98,8 @@ enum MotorState {
   STATE_HOMING,           // moving toward limit switch to find home
   STATE_HOMING_BACKOFF,   // reversing off the limit switch after contact
   STATE_HOMED,            // position is zeroed; accepts commands
-  STATE_RANDOM_CYCLING    // continuously moving to random positions
+  STATE_RANDOM_CYCLING,         // continuously moving to random positions
+  STATE_RANDOM_CYCLING_PAUSED   // waiting between random moves
 };
 MotorState motorStates[NUM_MOTORS] = {
   STATE_IDLE, STATE_IDLE, STATE_IDLE, STATE_IDLE
@@ -109,6 +110,10 @@ bool lastRawSwitchState[NUM_MOTORS]   = {HIGH, HIGH, HIGH, HIGH};
 bool debouncedSwitchState[NUM_MOTORS] = {HIGH, HIGH, HIGH, HIGH};
 elapsedMillis timeSinceLastTransition[NUM_MOTORS];
 elapsedMillis timeSinceLastSwitchReport;
+
+// --- Random cycling pause timers (one per motor) ---
+elapsedMillis pauseTimer[NUM_MOTORS];
+unsigned long pauseDuration[NUM_MOTORS] = {0, 0, 0, 0};
 
 // --- Non-blocking serial receive ---
 // From: https://forum.arduino.cc/t/serial-input-basics-updated/382007/3
@@ -167,8 +172,9 @@ void loop() {
       case STATE_HOMING:         updateHoming(i);         break;
       case STATE_HOMING_BACKOFF: updateHomingBackoff(i);  break;
       case STATE_HOMED:          updateHomed(i);          break;
-      case STATE_RANDOM_CYCLING: updateRandomCycling(i);  break;
-      default:                                            break;
+      case STATE_RANDOM_CYCLING:        updateRandomCyclingWithPause(i);   break;
+      case STATE_RANDOM_CYCLING_PAUSED:  updateRandomCyclingPaused(i);      break;
+      default:                                                               break;
     }
     steppers[i].run();
   }
@@ -301,9 +307,9 @@ void updateHomingBackoff(int i) {
 
     // Once every motor has finished homing, start random cycling on all of them.
     if (allMotorsHomed()) {
-      Serial.println("[CYCLE] All motors homed. Starting random cycling.");
+      Serial.println("[CYCLE] All motors homed. Starting random cycling with pauses.");
       for (int m = 0; m < NUM_MOTORS; m++) {
-        startRandomCycling(m);
+        startRandomCyclingWithPause(m);
       }
     }
   }
@@ -336,8 +342,9 @@ void updateHomed(int i) {
 }
 
 // ============================================================
-// Random cycling — each motor independently moves to a new
-// random position (100–600 mm) whenever it reaches its target.
+// Random cycling — no pause variant (kept for reference).
+// Each motor independently moves to a new random position
+// (100–600 mm) the instant it reaches its target.
 // ============================================================
 void startRandomCycling(int i) {
   long targetSteps = random(TRAVEL_MIN_STEPS, TRAVEL_MAX_STEPS + 1);
@@ -353,6 +360,42 @@ void startRandomCycling(int i) {
 void updateRandomCycling(int i) {
   if (steppers[i].distanceToGo() == 0) {
     startRandomCycling(i);
+  }
+}
+
+// ============================================================
+// Random cycling with pause — moves to a random position
+// (100–600 mm), then waits a random pause (100–10000 ms)
+// before picking the next target.
+// ============================================================
+void startRandomCyclingWithPause(int i) {
+  long targetSteps = random(TRAVEL_MIN_STEPS, TRAVEL_MAX_STEPS + 1);
+  steppers[i].moveTo(targetSteps);
+  motorStates[i] = STATE_RANDOM_CYCLING;
+  Serial.print("[CYCLE] Motor ");
+  Serial.print(i);
+  Serial.print(" → ");
+  Serial.print(targetSteps / STEPS_PER_MM, 1);
+  Serial.println(" mm");
+}
+
+void updateRandomCyclingWithPause(int i) {
+  // Called when state is STATE_RANDOM_CYCLING; motor is still moving.
+  if (steppers[i].distanceToGo() == 0) {
+    pauseDuration[i] = random(100, 10001);
+    pauseTimer[i]    = 0;
+    motorStates[i]   = STATE_RANDOM_CYCLING_PAUSED;
+    Serial.print("[CYCLE] Motor ");
+    Serial.print(i);
+    Serial.print(" pausing for ");
+    Serial.print(pauseDuration[i]);
+    Serial.println(" ms");
+  }
+}
+
+void updateRandomCyclingPaused(int i) {
+  if (pauseTimer[i] >= pauseDuration[i]) {
+    startRandomCyclingWithPause(i);
   }
 }
 
